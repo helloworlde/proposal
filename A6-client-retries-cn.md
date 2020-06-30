@@ -139,19 +139,27 @@ In general, only status codes that indicate the service did not process the requ
 告知原始的请求没有处理，取决于服务的所有者选择正确的可重试状态集，gRPC重试机制没有提供表明是否是幂等的机制
 
 
-##### Validation of retryPolicy
+##### Validation of retryPolicy 验证重试策略
 
 If `retryPolicy` is specified in a service config choice, the following validation rules apply:
 1. `maxAttempts` MUST be specified and MUST be a JSON integer value greater than 1. Values greater than 5 are treated as 5 without being considered a validation error.
 2. `initialBackoff` and `maxBackoff` MUST be specified, MUST follow the JSON representaion of [proto3 Duration type](https://developers.google.com/protocol-buffers/docs/proto3#json), and MUST have a duration value greater than 0.
 3. `backoffMultiplier` MUST be specified and MUST be a JSON number greater than 0.
 4. `retryableStatusCodes` MUST be specified as a JSON array of status codes and be non-empty. Each status code MUST be a valid gRPC status code and specified in the integer form or the case-insensitive string form (eg. [14], ["UNAVAILABLE"] or ["unavailable"]).
+如果服务配置了 `retryPolicy`，以下规则将会生效
+1. `maxAttempts` 必须是一个大于 1 的JSON数值，当大于5时将会被替换为5，不会报错
+2. `initialBackoff` 和 `maxBackoff` 必须配置，必须遵循 [proto3 Duration type](https://developers.google.com/protocol-buffers/docs/proto3#json)的规则，且必须大于0
+3. `backoffMultiplier` 必须配置，且必须是个大于0的 JSON 数值
+4. `retryableStatusCodes` 必须是一个非空的 JSON 数组，每个状态码必须是有效的 gRPC 状态码，可以是数值或者大小写不敏感的状态码(如. [14], ["UNAVAILABLE"] or ["unavailable"]).
 
-#### Hedging Policy
+#### Hedging Policy 对冲策略
 
 Hedging enables aggressively sending multiple copies of a single request without waiting for a response. Because hedged RPCs may be be executed multiple times on the server side, typically by different backends, it is important that hedging is only enabled for methods that are safe to execute multiple times without adverse affect.
+开启对冲策略会侵入性的发送多个同样的请求而不必等待返回结果，因为对冲的请求可能会在不同的 Server 端执行多次，只有在可以安全执行多次且没有影响的方法上开启对冲
+
 
 Hedged requests are configured with the following parameters:
+对冲请求配置参数如下：
 
 ```
 "hedgingPolicy": {
@@ -166,33 +174,48 @@ Hedged requests are configured with the following parameters:
 ```
 
 When a method has chosen a `hedgingPolicy`, the original RPC is sent immediately, as with a standard non-hedged call. After `hedgingDelay` has elapsed without a successful response, the second RPC will be issued. If neither RPC has received a response after `hedgingDelay` has elapsed again, a third RPC is sent, and so on, up to `maxAttempts`. In the above configuration, after 1ms there would be one outstanding RPC (the original), after 501ms there would be two outstanding RPCs (the original and the first hedged RPC), after 1001ms there would be three outstanding RPCs, and after 1501ms there would be four. As with retries, gRPC call deadlines apply to the entire chain of hedged requests. Once a deadline has passed, the operation fails regardless of in-flight RPCS, and regardless of the hedging configuration.
+当方法启用了对冲策略后，原始的RPC请求以非对冲的方式会被立即发送，当 `hedgingDelay` 时间之后请求没有成功返回，会发出第二个请求，当再次过了 `hedgingDelay` 之后依然没有返回结果时，会发出第三个请求，持续如此，直到达到最大的重试次数 `maxAttempts`，在上面的配置中，1ms会有一个未完成的 RPC(原始的)，501ms后会有两个未完成的 RPC请求(原始的RPC请求和第一个对冲的 RPC)，1001ms后会有三个，1501ms后会有四个，与重试一样，RPC的调用期限适用于所有对冲的 RPC请求，一旦到达期限，不管运行的 RPC请求是什么，也不管对冲配置是什么，请求都会失败
+
 
 The implementation will ensure that the listener returned to the client application forwards its calls (such as `onNext` or `onClose`) to all outstanding hedged RPCs.
+重试的实现会确保监听器会将未完成的对冲请求通过 `onNext` 或 `onClose` 返回给客户端
 
 When a non-error response is received (in response to any of the hedged requests), all outstanding hedged requests are canceled and the response is returned to the client application layer.
+当接收到一个不是错误的响应时(任意一个对冲请求的)，取消其他所有对冲请求，并将相应返回给应用层
 
 If a non-fatal status code is received from a hedged request, then the next hedged request in line is sent immediately, shortcutting its hedging delay. If any other status code is received, all outstanding RPCs are canceled and the error is returned to the client application layer.
+如果收到的响应是非失败的状态码，那么马上会发出一个对冲请求，缩短对冲延迟时间；如果接收到其他的状态的响应，所有的对冲请求都会被取消，并将错误返回给应用层
 
 If all instances of a hedged RPC fail, there are no additional retry attempts. Essentially, hedging can be seen as retrying the original RPC before a failure is even received.
+如果所有实例的对冲请求都失败了，则不会再执行重试，从本质上讲，对冲也可以看做是收到请求失败之前的重试
 
 If server pushback that specifies not to retry is received in response to a hedged request, no further hedged requests should be issued for the call.
+如果收到指定不重试的服务器回推作为对已对冲请求的响应，则不应为对该调用再发起对冲请求
 
 Hedged requests should be sent to distinct backends, if possible. To facilitate this, the gRPC client will maintain a list of previously used backend addresses for each hedged RPC. This list will be passed to the gRPC client's local load-balancing policy. The load balancing policy may use this information to send the hedged request to an address that was not previously used. If all available backend addresses have already been used, the load-balancing policy's response is implementation-dependent.
+对冲请求应当发给不同的服务端，为了实现这个，gRPC客户端将为每个已对冲RPC维护之前使用的后端地址列表，这个列表会传递给 gRPC的客户端用于负载均衡策略，负载均衡会根据这些信息选择一个之前没有发送过对冲请求的服务器，如果所有的服务端实例都被发送过对冲请求，那么根据负载均衡的实现选择
 
-##### Validation of hedgingPolicy
+
+##### Validation of hedgingPolicy 对冲策略校验
 
 If `hedgingPolicy` is specified in a service config choice, the following validation rules apply:
 1. `maxAttempts` MUST be specified and MUST be a JSON integer value greater than 1. Values greater than 5 are treated as 5 without being considered a validation error.
 2. `hedgingDelay` is an optional field but if specified MUST follow the JSON representation of proto3 Duration type.
 3. `nonFatalStatusCodes` is an optional field but if specified MUST be specified as a JSON array of status codes. Each status code MUST be a valid gRPC status code and specified in the integer form or the case-insensitive string form (eg. [14], ["UNAVAILABLE"] or ["unavailable"]).
 
+如果对服务配置了 `hedgingPolicy`，那么以下配置就会生效：
+1. `maxAttempts`必须指定并且必须是大于1的JSON 数值，大于5的值将不会生效，会替换为5
+2. `hedgingDelay` 是一个可选的属性，但是指定时必须遵守 proto3 Duration JSON 的格式
+3. `nonFatalStatusCodes` 是一个可选的属性，但是指定时必须是遵守 JSON 数组格式的状态码，每个状态码必须是有效的，可以是相应的数值或者大小写不敏感的字符(如 [14], ["UNAVAILABLE"] 或 ["unavailable"])
+
 ![State Diagram](A6_graphics/basic_hedge.png)
 
 [Link to SVG file](A6_graphics/basic_hedge.svg)
 
-#### Throttling Retry Attempts and Hedged RPCs
+#### Throttling Retry Attempts and Hedged RPCs 限制重试和对冲 RPC
 
 gRPC prevents server overload due to retries and hedged RPCs by disabling these policies when the client’s ratio of failures to successes passes a certain threshold. The throttling is done per server name. Retry throttling may be configured as follows:
+gRPC 为了避免重试或者对冲导致服务端超载，支持通过客户端的失败和成功的比率停止重试或者对冲，节流是按服务器名进行的，重试的节流配置如下：
 
 ```
 "retryThrottling": {
@@ -202,18 +225,26 @@ gRPC prevents server overload due to retries and hedged RPCs by disabling these 
 ```
 
 Throttling may only be specified per server name, rather than per method or per service.
+只能按服务器名指定节流，而不能根据方法或者服务名
 
 For each server name, the gRPC client maintains a `token_count` variable which is initially set to `maxTokens` and can take values between `0` and `maxTokens`. Every outgoing RPC (regardless of service or method invoked) will effect `token_count` as follows:
 * Every failed RPC will decrement the `token_count` by 1.
 * Every successful RPC will increment the `token_count` by `tokenRatio`.
+对于每一个服务名，gRPC 客户端记录了初始值为 `maxTokens`，范围在 `0` 和 `maxTokens` 之间的 `token_count` 变量，每个 RPC 请求都会影响`token_count`的值：
+* 每个失败的请求会使 `token_count` 减一
+* 每个成功的请求会使 `token_count` 增加 `tokenRatio`
 
 If `token_count` is less than or equal to the threshold, defined to be `(maxTokens / 2)`, then RPCs will not be retried until `token_count` rises over the threshold.
+如果 `token_count` 小于等于 `(maxTokens / 2)` 的临界值，则 RPC 将不会重试，直到 `token_count` 再次超过临界值
 
 Throttling also applies to hedged RPCs. The first outgoing RPC will always be sent, but subsequent hedged RPCs will only be sent if `token_count` is greater than the threshold.
+临界值同样适用于对冲请求，第一个请求一定会被发送，只有当 `token_count` 大于临界值的时候后续对冲请求才会发送
 
 Neither retry attempts or hedged RPCs block when `token_count` is less than or equal to the threshold. Retry attempts are canceled and the failure returned to the client application. The hedged request is cancelled, and if there are no other already-sent hedged RPCs the failure is returned to the client application.
+当 `token_count` 小于等于临界值时，无论是重试还是对冲请求都不会被发送，重试会取消并将失败返回给客户端，对冲将会被取消，如果没有已经发送的对冲请求那么会将失败返回给客户端
 
 The only RPCs that are counted as failures for the throttling policy are RPCs that fail with a status code that qualifies as a [retryable](#retryable-status-codes) or [non-fatal status code](#hedging-policy), or that receive a pushback response indicating not to retry. This avoids conflating server failure with responses to malformed requests (such as the `INVALID_ARGUMENT` status code).
+对于节流策略而言
 
 ##### Validation of retryThrottling
 
