@@ -244,30 +244,41 @@ Neither retry attempts or hedged RPCs block when `token_count` is less than or e
 当 `token_count` 小于等于临界值时，无论是重试还是对冲请求都不会被发送，重试会取消并将失败返回给客户端，对冲将会被取消，如果没有已经发送的对冲请求那么会将失败返回给客户端
 
 The only RPCs that are counted as failures for the throttling policy are RPCs that fail with a status code that qualifies as a [retryable](#retryable-status-codes) or [non-fatal status code](#hedging-policy), or that receive a pushback response indicating not to retry. This avoids conflating server failure with responses to malformed requests (such as the `INVALID_ARGUMENT` status code).
-对于节流策略而言
+对于节流策略而言，只有失败的状态码或者指定需要重试的状态码，或者指定非失败的状态码，或者server端返回的指定不需要重试的才会被算入节流策略的失败数量中，这避免了服务器故障和与对格式错误的请求的响应混为一谈(如`INVALID_ARGUMENT`状态码)
 
-##### Validation of retryThrottling
+##### Validation of retryThrottling 重试节流校验
 
 If `retryThrottling` is specified in a service config, the following validation rules apply:
 1. `maxTokens` MUST be specified and MUST be a JSON integer value in the range (0, 1000].
 2. `tokenRatio` MUST be specified and MUST be a JSON floating point greater than 0. Decimal places beyond 3 are ignored. (eg. 0.5466 is treated as 0.546.)
 
-#### Pushback
+如果服务指定了 `retryThrottling` ，以下校验就会生效：
+1. `maxTokens`必须指定并且必须是 JSON 格式的的整数值，范围为 (0,1000]
+2. `tokenRatio` 必须指定并且必须是大于0的 JSON 格式的浮点数，小数点后三位有效，超过的将会被忽略
+
+#### Pushback 回推
 
 Servers may explicitly pushback by setting metadata in their response to the client. The pushback can either tell the client to retry after a given delay or to not retry at all. If the client has already exhausted its `maxAttempts`, the call will not be retried even if the server says to retry after a given delay.
+服务的可以通过在响应中返回元数据给客户端显式回推，回推可以告诉客户端是否在给定延时后重试或者完全不重试，如果客户端已经达到最大重试次数 `maxAttempts`，即使服务端返回在指定延时后重试，客户端也不会执行
 
 Pushback may also be received to a hedged request. If the pushback says not to retry, no further hedged requests will be sent. If the pushback says to retry after a given delay, the next hedged request (if any) will be issued after the given delay has elapsed.
+对冲的请求也可以接收回推，如果回推告诉客户端不要重试，那么不会有对冲请求继续发出，如果回推告诉客户端在指定延时后重试，下一个对冲请求(如果有的话)将会在给定的延迟后发出
 
 A new metadata key, `"grpc-retry-pushback-ms"`, will be added to support server pushback. The value is to be an ASCII encoded signed 32-bit integer with no unnecessary leading zeros that represents how many milliseconds to wait before sending a retry. If the value for pushback is negative or unparseble, then it will be seen as the server asking the client not to retry at all.
+将会添加一个新的元数据 `"grpc-retry-pushback-ms"`用于支持回推，值是一个 ASCII 编码的有符号的32位整数，表示在重试之前需要等待多少毫秒，如果值是一个负数或者不能解析，将被视为服务端要求不要重试
 
 When a client receives an explicit pushback response from a server, and it is appropriate to retry the RPC, it will retry after exactly that delay.  For subsequent retries, the delay period will be reset to the `initialBackoff` setting and scale according to the [Exponential Backoff](#exponential-backoff) section above, unless an explicit pushback response is received again.
+当客户端接收到服务端的明确的回推响应，可以重试，则会在指定的延迟后开始重试，后续的重试中，延时间隔将会被重置为 `initialBackoff`，并根据上面的 [指数退避](#exponential-backoff)部分缩放，除非再次收到回推响应
 
-#### Limits on Retries and Hedges
+#### Limits on Retries and Hedges 重试和对冲限制
 
 `maxAttempts` in both `retryPolicy` and `hedgingPolicy` have, by default, a client-side maximum value of 5. This client-side maximum value can be changed by the client through the use of channel arguments. Service owners may specify a higher value for these parameters, but higher values will be treated as equal to the maximum value by the client implementation. This mitigates security concerns related to the service config being transferred to the client via DNS.
+`retryPolicy` 和 `hedgingPolicy` 都有 `maxAttempts` 参数，默认情况下，客户端的最大值为5，可以通过 channel 的参数修改，服务负责人可能会指定一个更高的值，但是更高的值将会客户端视为等于最大值，这减轻了与通过DNS传输到客户端的服务配置相关的安全问题
 
-#### Summary of Retry and Hedging Logic
+
+#### Summary of Retry and Hedging Logic 重试和对冲逻辑总结
 There are five possible types of server responses. The list below enumerates the behavior of retry and hedging policies for each type of response. In all cases, if the maximum number of retry attempts or the maximum number of hedged requests is reached, no further RPCs are sent. Hedged RPCs are returned to the client application when all outstanding and pending requests have either received a response or been canceled.
+服务端可能返回五种类型的响应，以下列举了每种响应的重试和对冲的策略；所有情况下，如果达到了最大重试次数或者最大对冲次数，则不会继续发送 RPC 请求，当所有的未完成和挂起的请求收到响应或者取消时，已对冲的 RPC 将返回给客户端应用
 
 1. OK
     1. Retry policy: Successful response, return success to client application
@@ -289,34 +300,59 @@ There are five possible types of server responses. The list below enumerates the
     1. Retry policy: Retry in *n* ms. If this attempt also fails, retry delay will reset to initial backoff for the following retry (if applicable)
     2. Hedging policy: Send next hedged request in *n* ms. Subsequent hedged requests will resume at `n + hedgingDelay`
 
+1. OK 
+    1. 重试策略：成功响应，返回成功给客户端应用
+    2. 对冲策略：成功响应，取消之前和在等待的对冲请求
+2. 失败状态码
+    1. 重试策略：不会重试，返回失败给客户端应用
+    2. 对冲策略：取消之前和在等待的对冲请求
+3. 重试、非失败的没有回推的状态码
+    1. 重试策略：根据策略进行重试
+    2. 对冲策略：如果有则立即发送下一个计划中的对冲请求，随后的对冲请求将会在 `hedgingDelay` 后发出
+4. 回推：不重试
+    1. 重试策略：不重试，返回失败给客户端应用
+    2. 对冲策略：不发送任何对冲请求
+5. 回推：*n*ms 后重试
+    1. 重试策略：在 *n* ms 后重试，如果这次重试也失败了，且有后续重试请求，下一个重试请求的延时将被重置为初始延迟时间         
+    2. 对冲策略： *n* ms 后发出下一个对冲请求，随后的对冲请求将会在 `n + hedgingDelay` 后继续
+
 ![State Diagram](A6_graphics/StateDiagram.png)
 
 [Link to SVG file](A6_graphics/StateDiagram.svg)
 
-### Retry Internals
+### Retry Internals 内部重试
 
-#### Where Retries Occur
+#### Where Retries Occur 重试在哪里发生
 
 The retry policy will be implemented in-between the channel and the load balancing policy. That way every retry gets a chance to be sent out on a different subchannel than it originally failed on.
+重试会在 channel 和负载均衡策略之间实现，当原始请求失败之后有机会将请求转发给其他的 subchannel
 
 ![Where Retries Occur](A6_graphics/WhereRetriesOccur.png)
 
 [Link to SVG file](A6_graphics/WhereRetriesOccur.svg)
 
-#### When Retries are Valid
+#### When Retries are Valid 什么时候重试是有效的
 
 In certain cases it is not valid to retry an RPC. These cases occur when the RPC has been *committed*, and thus it does not make sense to perform the retry.
+有些情况下，重试 RPC 是无效的，这些情况发生在 RPC 已经被执行的时候，因此这些重试没有意义
 
 An RPC becomes *committed* in two scenarios:
 
 1. The client receives [Response-Headers](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#responses).
 2. The client’s outgoing message has overflowed the gRPC client library’s buffer.
 
+RPC 在以下两种情况下会被执行：
+1. 客户端收到 [Response-Headers](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#responses).
+2. 客户端发出的信息溢出了 gRPC 客户端的缓冲区
+
 The reasoning behind the first scenario is that the Response-Headers include initial metadata from the server. The metadata (or its absence) it is transmitted to the client application. This may fundamentally change the state of the client, so we cannot safely retry if a failure occurs later in the RPC’s life.
+第一个场景背后的原因是响应头包含服务端返回的初始元数据，元数据传输给客户端，可能会从根本上改变客户端的状态，因此，如果在 RPC 生命周期后期发生故障，则不能安全的进行重试
 
 gRPC servers should delay the Response-Headers until the first response message or until the application code chooses to send headers. If the application code closes the stream with an error before sending headers or any response messages, gRPC servers should send the error in Trailers-Only.
+gRPC 服务端应当延迟响应头，知道第一个响应消息或者状态码被发送到响应头中，如果应用状态因为错误在发送响应头或者响应消息之前关闭了流，gRPC 服务端应当发送Trailers-Only 的错误
 
 To clarify the second scenario, we define an *outgoing message* as everything the client sends on its connection to the server. For unary and server streaming calls, the outgoing message is a single message. For client and bidirectional streaming calls, the outgoing message is the entire message stream issued by the client after opening the connection. The gRPC client library buffers outgoing messages, and as long as the entirety of the outgoing message is in the buffer, it can be resent and retried. But as soon as the outgoing message grows too large to buffer, the gRPC client library cannot replay the entire stream of messages, and thus retries are not valid.
+为了明确第二个场景，将 *outgoing message* 定义为客户端在其连接到服务器上发送的所有消息，对于 unary 和 sever stream 调用，发送的下消息是单独的消息，对于双向的流调用，传出消息是客户端在打开连接后发出的整个消息流，gRPC客户端库缓冲传出的消息，只要传出的消息的整个都在缓冲区中，就可以重新发送和重试；但是一旦传出的消息变得太大而无法缓冲，gRPC客户端库就不能重播整个消息流，因此重试无效
 
 #### Memory Management (Buffering)
 
