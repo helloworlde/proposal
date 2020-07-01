@@ -354,13 +354,16 @@ gRPC 服务端应当延迟响应头，知道第一个响应消息或者状态码
 To clarify the second scenario, we define an *outgoing message* as everything the client sends on its connection to the server. For unary and server streaming calls, the outgoing message is a single message. For client and bidirectional streaming calls, the outgoing message is the entire message stream issued by the client after opening the connection. The gRPC client library buffers outgoing messages, and as long as the entirety of the outgoing message is in the buffer, it can be resent and retried. But as soon as the outgoing message grows too large to buffer, the gRPC client library cannot replay the entire stream of messages, and thus retries are not valid.
 为了明确第二个场景，将 *outgoing message* 定义为客户端在其连接到服务器上发送的所有消息，对于 unary 和 sever stream 调用，发送的下消息是单独的消息，对于双向的流调用，传出消息是客户端在打开连接后发出的整个消息流，gRPC客户端库缓冲传出的消息，只要传出的消息的整个都在缓冲区中，就可以重新发送和重试；但是一旦传出的消息变得太大而无法缓冲，gRPC客户端库就不能重播整个消息流，因此重试无效
 
-#### Memory Management (Buffering)
+#### Memory Management (Buffering) 内存管理(缓冲)
 
 The gRPC client library will support application-configured limits for the amount of memory used for retries. It is suggested that the client sets `retry_buffer_size_in_bytes` to limit the total amount of memory used to buffer retryable or hedged RPCs. The client should also set `per_rpc_buffer_limit_in_bytes` to limit the amount of memory used by any one RPC (to prevent a single large RPC from using the whole buffer and preventing retries of subsequent smaller RPCs). These limits are configured by the client, rather than coming from the service config.
+gRPC 客户端库支持配置用于重试的内存限制，建议客户端配置 `retry_buffer_size_in_bytes` 用于限制重试或对冲的缓存，同时客户端应当配置 `per_rpc_buffer_limit_in_bytes` 用于限制每一个 RPC 的缓冲，防止单个大型RPC使用整个缓冲区，并防止后续较小RPC的重试，这些限制配置在客户端，而不是服务端
 
 RPCs may only be retried when they are contained in the buffer. New RPCs which do not fit in the available buffer space (either due to the total available buffer space, or due to the per-RPC limit) will not be retryable, but the original RPC will still be sent.
+只有当 RPC 在缓冲中时才可以重试，新的重试 RPC 如果不适合当前的缓冲，不会重试，但是原始的请求依然会发送
 
 After the RPC response has been returned to the client application layer, the RPC is removed from the buffer.
+当 RPC 响应返回给客户端时，RPC 将会从缓冲中移除
 
 Client streaming RPCs will take up additional buffer space with each subsequent message, so additional buffering policy is needed. When the application sends a message on an RPC that causes the RPC to exceed the buffer limit, the RPC becomes committed, meaning that we choose one attempt to continue and stop all others.
 
@@ -437,9 +440,10 @@ Service owners must choose between a retry policy or a hedging policy. Unless th
 
 The parameters for throttling retry attempts and hedged RPCs when failures exceed a certain threshold are also set in the service config. Throttling applies across methods and services on a particular server, and thus may only be configured per-server name.
 
-#### Retry Policy
+#### Retry Policy 重试策略
 
 This is an example of a retry policy and its associated configuration. It implements exponential backoff with a maximum of four RPC attempts (1 original RPC, and 3 retries), only retrying RPCs when an `UNAVAILABLE` status code is received.
+重试策略举例以及相关的配置，实现了指数退避，最大重试次数是4(一次原始请求和三次重试)，只有返回 `UNAVAILABLE` 时才会重试
 
 ```
 "retryPolicy": {
@@ -453,9 +457,11 @@ This is an example of a retry policy and its associated configuration. It implem
 }
 ```
 
-#### Hedging Policy
+#### Hedging Policy 对冲策略
 
 The following example of a hedging policy configuration will issue an original RPC, then up to three hedged requests for each RPC, spaced out at 500ms intervals, until either: one of the requests receives a valid response, all fail, or the overall call deadline is reached. Analogously to `retryableStatusCodes` for the retry policy, `nonFatalStatusCodes` determines how hedging behaves when a non-OK response is received.
+以下对冲策略举例将发出原始请求，然后每个 RPC最多有三次对冲请求，间隔500ms，直到：收到有效的响应，所有的请求都失败，或者达到请求的最后时间，和 `retryableStatusCodes` 类似，`nonFatalStatusCodes` 根据非ok的响应状态决定对冲行为
+
 
 ```
 "hedgingPolicy": {
@@ -470,6 +476,7 @@ The following example of a hedging policy configuration will issue an original R
 ```
 
 The following example issues four RPCs simultaneously:
+下面的示例同时发出四个请求
 
 ```
 "hedgingPolicy": {
@@ -483,8 +490,10 @@ The following example issues four RPCs simultaneously:
 }
 ```
 
-#### Throttling Configuration
+#### Throttling Configuration 节流配置
+
 Throttling configuration applies to all services and methods on a given server, and so can only be set per-server name. The following configuration throttles retry attempts and hedged RPCs when the client's ratio of failures to successes exceeds ~10%.
+节流配置对所有请求的所有方法都生效，所以只能对每个服务器名配置，当客户端的失败请求与成功请求比例超过 10% 时将会限制对冲和重试请求
 
 ```
 "retryThrottling": {
@@ -493,9 +502,10 @@ Throttling configuration applies to all services and methods on a given server, 
 }
 ```
 
-#### Integration with Service Config
+#### Integration with Service Config 与服务配置集成
 
 The retry policy is transmitted to the client through the service config mechanism. The following is what the JSON configuration file would look like:
+重试策略通过服务配置机制传输给客户端，以下是 JSON 配置的实例
 
 ```
 {
@@ -512,11 +522,13 @@ The retry policy is transmitted to the client through the service config mechani
 
       // Only one of retryPolicy or hedgingPolicy may be set. If neither is set,
       // RPCs will not be retried or hedged.
+      // 重试策略和对冲策略只能设置一个，如果都设置了，那么重试或对冲不会生效
 
       "retryPolicy": {
         // The maximum number of RPC attempts, including the original RPC.
         //
         // This field is required and must be two or greater.
+        // 最大重试次数，包含原始请求，必须是大于等于2
         "maxAttempts": number,
 
         // Exponential backoff parameters. The initial retry attempt will occur at
@@ -528,9 +540,12 @@ The retry policy is transmitted to the client through the service config mechani
         // They are representations of the proto3 Duration type. Note that the
         // numeric portion of the string must be a valid JSON number.
         // They both must be greater than zero.
-        "initialBackoff": string,  // Required. Long decimal with "s" appended
-        "maxBackoff": string,  // Required. Long decimal with "s" appended
-        "backoffMultiplier": number  // Required. Must be greater than zero.
+        // 指数退避参数，初始重试会在 random(0, initialBackoff) 之内执行，如果还有重试，
+        // 之后的第 n个将会在 random(0, min(initialBackoff*backoffMultiplier**(n-1), maxBackoff))
+        // 之间，后面的两个配置必须是符合 proto3 规范的时间范围，数值部分必须是有效的 JSON 数值，必须大于0
+        "initialBackoff": string,  // Required. Long decimal with "s" appended 必须，数值，以s为单位
+        "maxBackoff": string,  // Required. Long decimal with "s" appended 必须，数值，以s为单位
+        "backoffMultiplier": number  // Required. Must be greater than zero. 必须，数值
 
         // The set of status codes which may be retried.
         //
@@ -538,6 +553,8 @@ The retry policy is transmitted to the client through the service config mechani
         // string form (eg. [14], ["UNAVAILABLE"] or ["unavailable"])
         //
         // This field is required and must be non-empty.
+        // 可以重试的状态码集合，可以是大小写不敏感的状态码或者对应的数值，(如. [14], ["UNAVAILABLE"] or ["unavailable"])
+        // 必须，且不能为空
         "retryableStatusCodes": []
       }
 
@@ -547,6 +564,7 @@ The retry policy is transmitted to the client through the service config mechani
         // original and all the hedged RPCs.
         //
         // This field is required and must be two or greater.
+        // 对冲策略最大执行次数，代表所有的请求次数，包括原始请求，必须，且大于等于2
         "maxAttempts": number,
 
         // The original RPC will be sent immediately, but the maxAttempts-1
@@ -556,6 +574,8 @@ The retry policy is transmitted to the client through the service config mechani
         // https://developers.google.com/protocol-buffers/docs/proto3#json
         // It is a representation of the proto3 Duration type. Note that the
         // numeric portion of the string must be a valid JSON number.
+        // 原始的请求将会立即发送，但是其余的对冲请求会每隔指定的延迟发送，设置为0s或者不设置，会立即发送
+        // 其余所有请求，必须是 proto3 的时间间隔，数值部分必须是有效的 JSON 数值
         "hedgingDelay": string,
 
         // The set of status codes which indicate other hedged RPCs may still
@@ -567,6 +587,10 @@ The retry policy is transmitted to the client through the service config mechani
         // string form (eg. [14], ["UNAVAILABLE"] or ["unavailable"])
         //
         // This field is optional.
+        // 表示可以对冲的状态码的集合，如果服务端返回的是非失败的状态码，对冲请求将会继续执行，
+        // 除此之外，对冲请求将会取消，错误将会返回给客户端应用层
+        // 可以对冲的状态码集合，可以是大小写不敏感的状态码或者对应的数值，(如. [14], ["UNAVAILABLE"] or ["unavailable"])
+        // 可以为空
         "nonFatalStatusCodes": []
       }
 
@@ -580,9 +604,11 @@ The retry policy is transmitted to the client through the service config mechani
   // If a RetryThrottlingPolicy is provided, gRPC will automatically throttle
   // retry attempts and hedged RPCs when the client’s ratio of failures to
   // successes exceeds a threshold.
-  //
+  // 如果提供了重试呢给节流策略，如果客户端失败请求和成功请求比率超过阈值，gRPC 会自动限制重试和对冲
+
   // For each server name, the gRPC client will maintain a token_count which is
   // initially set to maxTokens, and can take values between 0 and maxTokens.
+  // 对于每个服务名，gRPC会维护初始值为 maxTokens 的 token_count，可以是 0 到 maxTokens
   //
   // Every outgoing RPC (regardless of service or method invoked) will change
   // token_count as follows:
@@ -590,14 +616,21 @@ The retry policy is transmitted to the client through the service config mechani
   //   - Every failed RPC will decrement the token_count by 1.
   //   - Every successful RPC will increment the token_count by tokenRatio.
   //
+  // 不管调用是什么服务或方法，每个发出的请求都会改变token_count
+  //   - 每个失败的请求都会使 token_count 减一
+  //   - 每个成功的请求都会是 token_count 加 tokenRatio
+  // 
   // If token_count is less than or equal to maxTokens / 2, then RPCs will not
   // be retried and hedged RPCs will not be sent.
+  // 如果token_count 小于等于 maxTokens / 2，重试和对冲的请求将不会发送
   "retryThrottling": {
     // The number of tokens starts at maxTokens. The token_count will always be
     // between 0 and maxTokens.
     //
     // This field is required and must be in the range (0, 1000].  Up to 3
     // decimal places are supported
+    // tokens 的初始数量为 maxTokens ，token_count 返回在 0 和 maxTokens 之间
+    // 必须，且范围在 (0, 1000]，支持小数点后三位
     "maxTokens": number,
 
     // The amount of tokens to add on each successful RPC. Typically this will
@@ -605,6 +638,8 @@ The retry policy is transmitted to the client through the service config mechani
     //
     // This field is required and must be greater than zero. Up to 3 decimal
     // places are supported.
+    // 每个成功的请求添加的 token 数量，通常在0和1之间
+    // 这个参数是必须的，其必须大于-，支持小数点后三位
     "tokenRatio": number
   }
 }
