@@ -1,4 +1,4 @@
-gRPC Retry Design
+gRPC 重试设计
 ----
 * Author(s): [Noah Eisen](https://github.com/ncteisen) and [Eric Gribkoff](https://github.com/ericgribkoff)
 * Approver: a11r
@@ -6,8 +6,6 @@ gRPC Retry Design
 * Implementation: In progress for all language stacks
 * Last updated: 2017-09-13
 * Discussion at: https://groups.google.com/forum/#!topic/grpc-io/zzHIICbwTZE
-
-[TOC]
 
 ## 摘要
 
@@ -24,23 +22,23 @@ gRPC 客户端库可以根据服务设置的策略对失败的请求自动重试
 gRPC 支持配置两种重试策略，[服务配置](https://github.com/grpc/grpc/blob/master/doc/service_config.md)支持选择重试失败的请求，或者对冲(同时发出多个请求)，一个单独的 RPC 可以使用重试策略，或者对冲策略，但是不能同时使用
 
 重试策略的能力如下：
-* [最大重试次数](#maximum-number-of-retries)
-* [指数退避](#exponential-backoff)
-* [重试状态码](#retryable-status-codes)
+* [最大重试次数](#最大重试次数)
+* [指数退避](#指数退避)
+* [重试状态码](#指数退避)
 
-The hedging policy has the following parameters. See details [here](#hedging-policy).
-对冲策略的参数如下，可以参考 [对冲策略](#hedging-policy).
+The hedging policy has the following parameters. See details [here](#对冲策略).
+对冲策略的参数如下，可以参考 [对冲策略](#对冲策略).
 * 最大对冲请求数
 * 对冲请求时间间隔
 * 非失败状态码
 
-gRPC 提供了机制，当失败与成功的比率超过阈值时，将停止重试和对冲，可以参考 [节流限制](#throttling-retry-attempts-and-hedged-rpcs).
+gRPC 提供了机制，当失败与成功的比率超过阈值时，将停止重试和对冲，可以参考 [节流配置](#节流配置).
 
-还提供了一种机制，服务端可以发出显式的信号通知客户端在指定延迟后开始重试，参考 [服务推送的详细描述](#pushback)
+还提供了一种机制，服务端可以发出显式的信号通知客户端在指定延迟后开始重试，参考 [服务推送的详细描述](#回推)
 
-在一些场景下，gRPC可以保证请求不会到达服务端的逻辑处理，这些场景应该由 gRPC 透明的进行重试，详细可以参考 [透明重试](#transparent-retries)
+在一些场景下，gRPC可以保证请求不会到达服务端的逻辑处理，这些场景应该由 gRPC 透明的进行重试，详细可以参考 [透明重试](#透明重试)
 
-最后，有关重试的次数会通过元数据暴露给客户端和服务端，参考[暴露重试元数据](#exposed-retry-metadata)
+最后，有关重试的次数会通过元数据暴露给客户端和服务端，参考[暴露重试元数据](#暴露重试元数据)
 
 ![State Diagram](A6_graphics/basic_retry.png)
 
@@ -52,7 +50,7 @@ gRPC 提供了机制，当失败与成功的比率超过阈值时，将停止重
 
 重试策略支持配置最大重试次数，指数退避的参数，一组可以重试的状态，如：
 
-```
+```json
 "retryPolicy": {
   "maxAttempts": 4,
   "initialBackoff": "0.1s",
@@ -103,7 +101,7 @@ gPRC调用期限适用于给定 RPC 的所有重试；如，一个指定的RPC�
 
 对冲请求配置参数如下：
 
-```
+```json
 "hedgingPolicy": {
   "maxAttempts": 4,
   "hedgingDelay": "0.5s",
@@ -171,7 +169,7 @@ gRPC 为了避免重试或者对冲导致服务端超载，支持通过客户端
 1. `maxTokens`必须指定并且必须是 JSON 格式的的整数值，范围为 (0,1000]
 2. `tokenRatio` 必须指定并且必须是大于0的 JSON 格式的浮点数，小数点后三位有效，超过的将会被忽略
 
-#### Pushback 回推
+#### 回推
 
 服务的可以通过在响应中返回元数据给客户端显式回推，回推可以告诉客户端是否在给定延时后重试或者完全不重试，如果客户端已经达到最大重试次数 `maxAttempts`，即使服务端返回在指定延时后重试，客户端也不会执行
 
@@ -179,7 +177,7 @@ gRPC 为了避免重试或者对冲导致服务端超载，支持通过客户端
 
 将会添加一个新的元数据 `"grpc-retry-pushback-ms"`用于支持回推，值是一个 ASCII 编码的有符号的32位整数，表示在重试之前需要等待多少毫秒，如果值是一个负数或者不能解析，将被视为服务端要求不要重试
 
-当客户端接收到服务端的明确的回推响应，可以重试，则会在指定的延迟后开始重试，后续的重试中，延时间隔将会被重置为 `initialBackoff`，并根据上面的 [指数退避](#exponential-backoff)部分缩放，除非再次收到回推响应
+当客户端接收到服务端的明确的回推响应，可以重试，则会在指定的延迟后开始重试，后续的重试中，延时间隔将会被重置为 `initialBackoff`，并根据上面的 [指数退避](#指数退避)部分缩放，除非再次收到回推响应
 
 #### 重试和对冲限制
 
@@ -320,7 +318,7 @@ RPC 有三种失败方式：
 
 重试策略举例以及相关的配置，实现了指数退避，最大重试次数是4(一次原始请求和三次重试)，只有返回 `UNAVAILABLE` 时才会重试
 
-```
+```json
 "retryPolicy": {
   "maxAttempts": 4,
   "initialBackoff": "0.1s",
@@ -336,7 +334,7 @@ RPC 有三种失败方式：
 
 以下对冲策略举例将发出原始请求，然后每个 RPC最多有三次对冲请求，间隔500ms，直到：收到有效的响应，所有的请求都失败，或者达到请求的最后时间，和 `retryableStatusCodes` 类似，`nonFatalStatusCodes` 根据非ok的响应状态决定对冲行为
 
-```
+```json
 "hedgingPolicy": {
   "maxAttempts": 4,
   "hedgingDelay": "0.5s",
@@ -350,7 +348,7 @@ RPC 有三种失败方式：
 
 下面的示例同时发出四个请求
 
-```
+```json
 "hedgingPolicy": {
   "maxAttempts": 4,
   "hedgingDelay": "0s",
@@ -366,7 +364,7 @@ RPC 有三种失败方式：
 
 节流配置对所有请求的所有方法都生效，所以只能对每个服务器名配置，当客户端的失败请求与成功请求比例超过 10% 时将会限制对冲和重试请求
 
-```
+```json
 "retryThrottling": {
   "maxTokens": 10,
   "tokenRatio": 0.1
@@ -377,7 +375,7 @@ RPC 有三种失败方式：
 
 重试策略通过服务配置机制传输给客户端，以下是 JSON 配置的实例
 
-```
+```json
 {
   "loadBalancingPolicy": string,
 
