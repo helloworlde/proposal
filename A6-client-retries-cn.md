@@ -366,16 +366,21 @@ After the RPC response has been returned to the client application layer, the RP
 当 RPC 响应返回给客户端时，RPC 将会从缓冲中移除
 
 Client streaming RPCs will take up additional buffer space with each subsequent message, so additional buffering policy is needed. When the application sends a message on an RPC that causes the RPC to exceed the buffer limit, the RPC becomes committed, meaning that we choose one attempt to continue and stop all others.
+客户端的 stream 请求将为每个后续消息占用额外的缓冲区，所以额外缓冲区策略是必须的，如果应用发送了一个消息超过了缓冲区限制，这个 RPC 将会被提交，意味着只选择一个进行尝试并阻止其他尝试
 
 For retriable RPCs, when an RPC becomes committed, the client will continue with the currently in-flight attempt but will not make any subsequent attempts, even if the current attempt fails with a retryable status and there are retry attempts remaining.
+对于可重试的 RPC，当 RPC 提交后，客户端将会继续当前的重试，但是其他的重试不会继续，即使当前的重试失败且有重试尝试
 
 For hedged RPCs, when an RPC becomes committed, the client will continue the currently in-flight attempt on which the maximum number of messages have already been sent. All other currently in-flight attempts will be immediately cancelled, and no subsequent attempts will be started.
+对于对冲的 RPC，当 RPC 提交后，客户端会继续已经发送的数量最大的请求，其他的所有执行中的会立即取消，后续的请求不会执行
 
 Once we have committed to a particular attempt, any messages that have already been sent on the that attempt can be immediately freed from the buffer, and each subsequent message that is replayed can be freed as soon as it is sent. The new message sent by the application (which caused the RPC to exceed the buffer limit) will never be added to the buffer in the first place; it will stay pending until all previous messages have been replayed, and then it will be sent immediately without buffering.
+一旦提交了特定的尝试，尝试中的其他已经发送的请求会立即释放缓冲区，后续的请求在发送后会立即释放缓冲区；应用的新的请求如果超过缓冲区限制，则不会加到缓冲区；会持续等待直到所有值钱的消息都已经发送，然后会不经过缓冲区立即发送
 
 When an RPC is evicted from the buffer, pending hedged requests should be canceled immediately. Implementations must avoid potential scheduling race conditions when canceling pending requests concurrently with incoming responses to already sent hedges, and ensure that failures are relayed to the client application logic when no more hedged requests will be possible and all outstanding requests have returned.
+当 RPC 从缓冲区移除之后，等待对冲的请求应当被立即取消，实现必须避免潜在的调度竞争条件时取消挂起的请求与传入的响应已发送的限制，并确保在不再有任何被对冲的请求并且所有未完成的请求都已返回时，将故障转发到客户端应用程序逻辑
 
-#### Transparent Retries
+#### Transparent Retries 透明重试
 
 RPC failures can occur in three distinct ways:
 
@@ -383,39 +388,56 @@ RPC failures can occur in three distinct ways:
 2. The RPC reaches the server, but has never been seen by the server application logic.
 3. The RPC is seen by the server application logic, and fails.
 
+RPC 有三种失败方式：
+1. RPC 没有离开客户端
+2. RPC 到达了服务端，但是没有发送给服务端的逻辑处理
+3. RPC 经过服务端的逻辑处理，但是失败了
+
 ![Where RPCs Fail](A6_graphics/WhereRPCsFail.png)
 
 [Link to SVG file](A6_graphics/WhereRPCsFail.svg)
 
 The last case is handled by the configurable retry policy that is the main focus of this document. The first two cases are retried automatically by the gRPC client library, **regardless** of the retry configuration set by the service owner. We are able to do this because these request have not made it to the server application logic, and thus are always safe to retry.
+最后一种失败场景是配置的重试策略处理的，也是这个文档的关注点，前两种场景会通过 gRPC 客户端库自动重试，重试配置的 **regardless** 由服务所有者自己配置；之所以有客户端自动重试是因为请求没有到达服务端处理逻辑，所以是可以安全重试的
 
 In the first case, in which the RPC never leaves the client, the client library can transparently retry until a success occurs, or the RPC's deadline passes.
+在第一种情况下，请求没有离开客户端，客户端可以透明重试，直到成功，所以 RPC 到达超时时间
 
 If the RPC reaches the gRPC server library, but has never been seen by the server application logic (the second case), the client library will immediately retry it once. If this fails, then the RPC will be handled by the configured retry policy. This extra caution is needed because this case involves extra load on the wire.
+如果 RPC 到达了服务端库，但是没有发送给应用逻辑处理(第二种场景)，客户端会立即重试，如果失败了，会根据重试策略进行处理，需要格外小心，因为这种情况涉及到线路上的额外负载
 
 Since retry throttling is designed to prevent server application overload, and these transparent retries do not make it to the server application layer, they do not count as failures when deciding whether to throttle retry attempts.
+由于重试调节是为了防止服务器应用程序过载而设计的，而且这些透明的重试不会到达服务器应用程序层，因此在决定是否限制重试尝试时，它们不会被视为失败
 
 Similarly, transparent retries do not count toward the limit of configured RPC attempts (`maxAttempts`).
+同样的，透明重试也不会算在 RPC 的重试次数 `maxAttempts` 中
 
 ![State Diagram](A6_graphics/transparent.png)
 
 [Link to SVG file](A6_graphics/transparent.svg)
 
-#### Exposed Retry Metadata
+#### Exposed Retry Metadata 暴露重试元数据
 
 Both client and server application logic will have access to data about retries via gRPC metadata. Upon seeing an RPC from the client, the server will know if it was a retry, and moreover, it will know the number of previously made attempts. Likewise, the client will receive the number of retry attempts made when receiving the results of an RPC.
+客户端和服务端的应用逻辑都可以获取到重试的 gRPC 元数据，在看到来自客户端的请求时，服务端可以知道是不是重试，而且还可以知道之前重试的次数，同样，在收到 RPC 的响应时，可以知道重试的次数
 
 The header name for exposing the metadata will be `"grpc-previous-rpc-attempts"` to give clients and servers access to the attempt count. This value represents the number of preceding retry attempts. Thus, it will not be present on the first RPC, will be 1 for the second RPC, and so on. The value for this field will be an integer.
+将会在 header 里面暴露元数据 `"grpc-previous-rpc-attempts"` 用于客户端和服务端获取重试次数，此值代表之前尝试的次数，因此，在第一次请求时没有该值，第二次请求时是1，以此类推，这个属性的值是整数值
 
-#### Disabling Retries
+#### Disabling Retries 禁止重试
 
 Clients cannot override retry policy set by the service config. However, retry support can be disabled entirely within the gRPC client library. This is designed to enable existing libraries that wrap gRPC with their own retry implementation (such as Veneer Toolkit) to avoid having retries taking place at the gRPC layer and within their own libraries.
+客户端不能覆盖服务配置的重试配置，但是，gRPC 客户端库可以禁止所有的重试，这个设计用于使用自己封装实现的重试，避免在 gRPC 层替换重试重试策略
 
 Eventually, retry logic should be taken out of the wrapping libraries, and only exist in gRPC. But allowing the retries to be disabled entirely will make that rollout process easier.
+最终，重试逻辑应该从包装库中取出，并且只存在于gRPC中，但是允许完全禁用重试将使替换过程更容易
 
-#### Retry and Hedging Statistics
+
+#### Retry and Hedging Statistics 重试和对冲次数统计
 
 gRPC will treat each retry attempt or hedged RPC as a distinct RPC with regards to the current per-RPC metrics. For example, when an RPC fails with a retryable status code and a retry attempt is made, the original request and the retry attempt will be recorded as two separate RPCs.
+就当前的 gRPC 指标策略而言，原始的请求和重试及对冲被认为是不同的请求，如，一个请求失败并且状态是可重试的，并且进行了重试，那么原始的请求和重试的请求将会被记录为两个独立的请求
+
 
 Additionally, to present a clearer picture of retry attempts, we add three additional per-method metrics:
 
@@ -432,13 +454,31 @@ Additionally, to present a clearer picture of retry attempts, we add three addit
 
 For hedged requests, we record the same stats as above, treating the first hedged request as the initial RPC and subsequent hedged requests as retry attempts.
 
-### Configuration Language
+此外，为了更清晰的展示重试，增加了三个额外的指标：
+1. 重试的总次数
+2. 重试失败的总次数
+3. 重试尝试的直方图：
+    1. 重试尝试次数将会落在以下桶中：
+        1. \>=1, >=2, >=3, >=4, >=5, >=10, >=100, >=1000
+    2. 每次重试都会增加桶中的技术，如：
+        1. 第一次重试会使 ">=1" 增加1
+        2. 第二次重试会使 ">=2" 增加1，但是 ">=1" 不会变
+        3. 第五到第九次重试会使 ">=5" 加一
+        4. 第十到第99次重试会使 ">=10" 加一
+
+对于对冲请求，记录的指标和上面一样，将第一个被对冲的请求视为初始RPC，将随后的被对冲请求视为重试尝试
+
+### Configuration Language 配置语言
 
 Retry and hedging configuration is set as part of the service config, which is transmitted to the client during DNS resolution. Like other aspects of the service config, retry or hedging policies can be specified per-method, per-service, or per-server name.
+重试和对冲配置是服务配置的一部分，在 DNS 解析阶段传递给客户端，和服务配置的其他方面一样，重试和对冲策略可以指定在每个方法，每个服务或这每个服务名
 
 Service owners must choose between a retry policy or a hedging policy. Unless the service owner specifies a policy in the configuration, retries and hedging will not be enabled. The retry policy and hedging policy each have their own set of configuration options, detailed below.
+服务所有者必须在重试和对冲策略中选择一个，除非在配置中指定了策略，否则重试和对冲不会生效；重试策略和对冲策略都有自己的一组配置选项，具体如下所示
 
 The parameters for throttling retry attempts and hedged RPCs when failures exceed a certain threshold are also set in the service config. Throttling applies across methods and services on a particular server, and thus may only be configured per-server name.
+在服务配置中还设置了在故障超过某个阈值时限制重试尝试和已对冲的 RPC 的参数，节流应用于特定服务器上的方法和服务之间，因此可能只对每个服务器名进行配置
+
 
 #### Retry Policy 重试策略
 
