@@ -375,7 +375,7 @@ RPC 有三种失败方式：
 
 重试策略通过服务配置机制传输给客户端，以下是 JSON 配置的实例
 
-```json
+```
 {
   "loadBalancingPolicy": string,
 
